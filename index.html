@@ -131,6 +131,17 @@
   .btn-ghost{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
   .btn-ghost:hover:not(:disabled){background:#e9eee7}
 
+  /* unit switch */
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{
+    flex:1;padding:8px 0;font-size:12px;font-weight:600;font-family:var(--sans);
+    background:var(--panel-2);color:var(--muted);border:none;cursor:pointer;
+    transition:background .15s,color .15s;
+  }
+  .seg button + button{border-left:1px solid var(--line)}
+  .seg button.on{background:var(--amber);color:#fff}
+  .seg button:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+
   /* legend */
   .legend{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:7px}
   .legend .row{display:flex;align-items:center;gap:9px}
@@ -216,8 +227,16 @@
       <div class="stats">
         <div class="stat"><div class="v" id="stPoints">—</div><div class="l">Points</div></div>
         <div class="stat"><div class="v" id="stWpts">—</div><div class="l">Waypoints</div></div>
-        <div class="stat"><div class="v" id="stDist">—</div><div class="l">Distance km</div></div>
-        <div class="stat"><div class="v" id="stEle">—</div><div class="l">Elev range m</div></div>
+        <div class="stat"><div class="v" id="stDist">—</div><div class="l" id="stDistL">Distance km</div></div>
+        <div class="stat"><div class="v" id="stEle">—</div><div class="l" id="stEleL">Elev range m</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Units</h2>
+      <div class="seg" role="group" aria-label="Units">
+        <button id="uMetric" class="on" aria-pressed="true">Metric</button>
+        <button id="uImperial" aria-pressed="false">Imperial</button>
       </div>
     </div>
 
@@ -301,6 +320,28 @@ map.on('zoomend', () => roZoom.textContent = map.getZoom());
 let records = [];   // {type,name,segment,lat,lon,ele,time}
 let dataBounds = null;
 let loadedName = '';
+
+/* ---- units ---- */
+let imperial = false;
+const M_TO_FT = 3.280839895, M_TO_MI = 1/1609.344;
+const eleVal   = m => imperial ? m*M_TO_FT : m;          // meters -> display
+const eleUnit  = () => imperial ? 'ft' : 'm';
+const distVal  = m => imperial ? m*M_TO_MI : m/1000;     // meters -> display (mi or km)
+const distUnit = () => imperial ? 'mi' : 'km';
+
+function setUnits(imp){
+  if(imperial === imp) return;
+  imperial = imp;
+  document.getElementById('uMetric').classList.toggle('on', !imp);
+  document.getElementById('uMetric').setAttribute('aria-pressed', String(!imp));
+  document.getElementById('uImperial').classList.toggle('on', imp);
+  document.getElementById('uImperial').setAttribute('aria-pressed', String(imp));
+  document.getElementById('stDistL').textContent = 'Distance ' + distUnit();
+  document.getElementById('stEleL').textContent  = 'Elev range ' + eleUnit();
+  if(records.length) renderData(false);   // re-render stats, popups, profile — keep current view
+}
+document.getElementById('uMetric').addEventListener('click', () => setUnits(false));
+document.getElementById('uImperial').addEventListener('click', () => setUnits(true));
 
 /* ============================================================
    Upload handling
@@ -442,13 +483,13 @@ function popupHtml(r){
   let h = '';
   if(r.name) h += '<span class="k">name</span> '+escapeHtml(r.name)+'<br>';
   h += '<span class="k">lat</span> '+r.lat.toFixed(6)+'<br><span class="k">lon</span> '+r.lon.toFixed(6);
-  if(r.ele!=='') h += '<br><span class="k">ele</span> '+r.ele+' m';
+  if(r.ele!=='') h += '<br><span class="k">ele</span> '+Math.round(eleVal(r.ele))+' '+eleUnit();
   if(r.time) h += '<br><span class="k">time</span> '+escapeHtml(r.time);
   return h;
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-function renderData(){
+function renderData(fit = true){
   gpsLayer.clearLayers();
 
   // group linear points by segment
@@ -493,14 +534,14 @@ function renderData(){
   }
 
   dataBounds = allLatLngs.length ? L.latLngBounds(allLatLngs) : null;
-  if(dataBounds) map.fitBounds(dataBounds.pad(0.15));
+  if(fit && dataBounds) map.fitBounds(dataBounds.pad(0.15));
 
   // stats
   document.getElementById('stPoints').textContent = trkCount || '0';
   document.getElementById('stWpts').textContent = wptCount || '0';
-  document.getElementById('stDist').textContent = trkCount>1 ? (dist/1000).toFixed(2) : '0';
+  document.getElementById('stDist').textContent = trkCount>1 ? distVal(dist).toFixed(2) : '0';
   document.getElementById('stEle').textContent = isFinite(eleMin)
-      ? Math.round(eleMin)+'–'+Math.round(eleMax) : '—';
+      ? Math.round(eleVal(eleMin))+'–'+Math.round(eleVal(eleMax)) : '—';
 
   document.getElementById('btnCsv').disabled = false;
   document.getElementById('btnZoom').disabled = false;
@@ -582,13 +623,13 @@ function drawProfileBase(){
     pCtx.strokeStyle = cLine; pCtx.lineWidth = 1;
     pCtx.beginPath(); pCtx.moveTo(PPAD.l, y); pCtx.lineTo(w-PPAD.r, y); pCtx.stroke();
     pCtx.fillStyle = cMuted;
-    pCtx.fillText(Math.round(e)+' m', PPAD.l-6, y);
+    pCtx.fillText(Math.round(eleVal(e))+' '+eleUnit(), PPAD.l-6, y);
   }
   /* distance labels */
   pCtx.textAlign = 'center'; pCtx.textBaseline = 'top';
   for(let i = 0; i <= 4; i++){
-    const d = pTotal*i/4;
-    pCtx.fillText((d/1000).toFixed(d >= 10000 ? 0 : 1)+' km', pX(d), h-PPAD.b+6);
+    const d = pTotal*i/4, dv = distVal(d);
+    pCtx.fillText(dv.toFixed(dv >= 10 ? 0 : 1)+' '+distUnit(), pX(d), h-PPAD.b+6);
   }
 
   /* area fill + line, broken per segment */
@@ -627,7 +668,7 @@ function drawProfileHover(idx){
   pCtx.beginPath(); pCtx.arc(x, y, 4.5, 0, Math.PI*2);
   pCtx.fillStyle = '#ff7a1a'; pCtx.fill();
   pCtx.strokeStyle = '#fff'; pCtx.lineWidth = 2; pCtx.stroke();
-  preadout.innerHTML = '<b>'+(p.d/1000).toFixed(2)+'</b> km &nbsp;&nbsp;<b>'+Math.round(p.ele)+'</b> m';
+  preadout.innerHTML = '<b>'+distVal(p.d).toFixed(2)+'</b> '+distUnit()+' &nbsp;&nbsp;<b>'+Math.round(eleVal(p.ele))+'</b> '+eleUnit();
 }
 
 function setHover(idx, moveMapMarker){
