@@ -6,6 +6,7 @@
 <title>Trackplot — GPS file viewer</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root{
     --ink:#f2f4f1;          /* app background */
@@ -243,6 +244,7 @@
     <div class="section">
       <h2>Export</h2>
       <button class="btn btn-amber" id="btnCsv" disabled>&#8681;&nbsp; Download CSV</button>
+      <button class="btn btn-amber" id="btnShp" disabled>&#8681;&nbsp; Download Shapefile (.zip)</button>
       <button class="btn btn-ghost" id="btnZoom" disabled>Zoom to data</button>
       <button class="btn btn-ghost" id="btnClear" disabled>Clear data</button>
     </div>
@@ -544,6 +546,7 @@ function renderData(fit = true){
       ? Math.round(eleVal(eleMin))+'–'+Math.round(eleVal(eleMax)) : '—';
 
   document.getElementById('btnCsv').disabled = false;
+  document.getElementById('btnShp').disabled = false;
   document.getElementById('btnZoom').disabled = false;
   document.getElementById('btnClear').disabled = false;
 
@@ -747,6 +750,195 @@ document.getElementById('btnZoom').addEventListener('click', () => {
   if(dataBounds) map.fitBounds(dataBounds.pad(0.15));
 });
 
+/* ============================================================
+   Esri Shapefile export (.shp + .shx + .dbf + .prj, zipped)
+   Waypoints -> Point shapefile; tracks/routes -> PolyLine shapefile
+   ============================================================ */
+const WGS84_PRJ =
+  'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],' +
+  'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]';
+
+function shpMainHeader(dv, fileWords, shapeType, bbox){
+  dv.setInt32(0, 9994, false);           // magic
+  dv.setInt32(24, fileWords, false);     // file length in 16-bit words
+  dv.setInt32(28, 1000, true);           // version
+  dv.setInt32(32, shapeType, true);      // 1 = Point, 3 = PolyLine
+  dv.setFloat64(36, bbox[0], true);      // xmin
+  dv.setFloat64(44, bbox[1], true);      // ymin
+  dv.setFloat64(52, bbox[2], true);      // xmax
+  dv.setFloat64(60, bbox[3], true);      // ymax  (z/m ranges stay 0)
+}
+function bboxOf(pts){
+  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
+  for(const p of pts){
+    x0=Math.min(x0,p.lon); y0=Math.min(y0,p.lat);
+    x1=Math.max(x1,p.lon); y1=Math.max(y1,p.lat);
+  }
+  return [x0,y0,x1,y1];
+}
+
+/* --- Point geometry (shape type 1) --- */
+function buildPointShapefile(pts){
+  const n = pts.length;
+  const shpBytes = 100 + n*28;                 // 8B rec header + 20B content
+  const shxBytes = 100 + n*8;
+  const shp = new ArrayBuffer(shpBytes), dv = new DataView(shp);
+  const shx = new ArrayBuffer(shxBytes), sx = new DataView(shx);
+  const bb = bboxOf(pts);
+  shpMainHeader(dv, shpBytes/2, 1, bb);
+  shpMainHeader(sx, shxBytes/2, 1, bb);
+  let off = 100;
+  pts.forEach((p,i) => {
+    dv.setInt32(off,   i+1, false);            // record number (1-based)
+    dv.setInt32(off+4, 10,  false);            // content length in words
+    dv.setInt32(off+8, 1,   true);             // shape type
+    dv.setFloat64(off+12, p.lon, true);        // X
+    dv.setFloat64(off+20, p.lat, true);        // Y
+    sx.setInt32(100+i*8,   off/2, false);      // offset in words
+    sx.setInt32(100+i*8+4, 10,   false);
+    off += 28;
+  });
+  return {shp, shx};
+}
+
+/* --- PolyLine geometry (shape type 3), one record per track segment --- */
+function buildLineShapefile(lines){
+  let shpBytes = 100;
+  for(const l of lines) shpBytes += 8 + 48 + 16*l.pts.length;
+  const shxBytes = 100 + lines.length*8;
+  const shp = new ArrayBuffer(shpBytes), dv = new DataView(shp);
+  const shx = new ArrayBuffer(shxBytes), sx = new DataView(shx);
+  const all = lines.flatMap(l => l.pts);
+  const bb = bboxOf(all);
+  shpMainHeader(dv, shpBytes/2, 3, bb);
+  shpMainHeader(sx, shxBytes/2, 3, bb);
+  let off = 100;
+  lines.forEach((l,i) => {
+    const n = l.pts.length, content = 48 + 16*n;
+    const lbb = bboxOf(l.pts);
+    dv.setInt32(off,   i+1, false);
+    dv.setInt32(off+4, content/2, false);
+    dv.setInt32(off+8, 3, true);               // shape type
+    dv.setFloat64(off+12, lbb[0], true);
+    dv.setFloat64(off+20, lbb[1], true);
+    dv.setFloat64(off+28, lbb[2], true);
+    dv.setFloat64(off+36, lbb[3], true);
+    dv.setInt32(off+44, 1, true);              // numParts
+    dv.setInt32(off+48, n, true);              // numPoints
+    dv.setInt32(off+52, 0, true);              // part 0 start index
+    let p = off + 56;
+    for(const pt of l.pts){
+      dv.setFloat64(p, pt.lon, true);
+      dv.setFloat64(p+8, pt.lat, true);
+      p += 16;
+    }
+    sx.setInt32(100+i*8,   off/2, false);
+    sx.setInt32(100+i*8+4, content/2, false);
+    off += 8 + content;
+  });
+  return {shp, shx};
+}
+
+/* --- dBase III .dbf --- */
+function buildDBF(fields, rows){
+  const recSize = 1 + fields.reduce((s,f) => s + f.len, 0);
+  const hdrSize = 32 + fields.length*32 + 1;
+  const buf = new ArrayBuffer(hdrSize + recSize*rows.length + 1);
+  const u8 = new Uint8Array(buf), dv = new DataView(buf);
+  const d = new Date();
+  u8[0] = 0x03; u8[1] = d.getFullYear()-1900; u8[2] = d.getMonth()+1; u8[3] = d.getDate();
+  dv.setInt32(4, rows.length, true);
+  dv.setInt16(8, hdrSize, true);
+  dv.setInt16(10, recSize, true);
+  fields.forEach((f,i) => {
+    const o = 32 + i*32;
+    for(let c = 0; c < Math.min(f.name.length,10); c++) u8[o+c] = f.name.charCodeAt(c);
+    u8[o+11] = f.type.charCodeAt(0);           // 'C' or 'N'
+    u8[o+16] = f.len; u8[o+17] = f.dec || 0;
+  });
+  u8[32 + fields.length*32] = 0x0D;            // header terminator
+  let off = hdrSize;
+  for(const r of rows){
+    u8[off] = 0x20;                            // not deleted
+    let p = off + 1;
+    for(const f of fields){
+      const v = r[f.name];
+      let s;
+      if(f.type === 'N'){
+        s = (v === '' || v == null || !isFinite(v)) ? '' : Number(v).toFixed(f.dec || 0);
+        if(s.length > f.len) s = s.slice(0, f.len);
+        s = s.padStart(f.len, ' ');
+      } else {
+        s = String(v == null ? '' : v).slice(0, f.len).padEnd(f.len, ' ');
+      }
+      for(let c = 0; c < f.len; c++) u8[p+c] = s.charCodeAt(c) & 0xFF;
+      p += f.len;
+    }
+    off += recSize;
+  }
+  u8[buf.byteLength-1] = 0x1A;                 // EOF
+  return buf;
+}
+
+document.getElementById('btnShp').addEventListener('click', async () => {
+  const btn = document.getElementById('btnShp');
+  btn.disabled = true;
+  try{
+    const base = (loadedName.replace(/\.[^.]+$/,'') || 'gps-data').replace(/[^\w\-]+/g,'_');
+    const zip = new JSZip();
+
+    // waypoints -> point layer
+    const wpts = records.filter(r => r.type === 'waypoint');
+    if(wpts.length){
+      const {shp, shx} = buildPointShapefile(wpts);
+      const dbf = buildDBF(
+        [{name:'NAME',type:'C',len:64},{name:'ELEV_M',type:'N',len:13,dec:2},{name:'TIME',type:'C',len:24}],
+        wpts.map(w => ({NAME:w.name, ELEV_M:w.ele, TIME:w.time}))
+      );
+      zip.file(base+'_waypoints.shp', shp);
+      zip.file(base+'_waypoints.shx', shx);
+      zip.file(base+'_waypoints.dbf', dbf);
+      zip.file(base+'_waypoints.prj', WGS84_PRJ);
+    }
+
+    // tracks & routes -> polyline layer (one feature per segment)
+    const segMap = {};
+    for(const r of records){
+      if(r.type === 'waypoint') continue;
+      (segMap[r.segment] = segMap[r.segment] || {name:r.name, seg:r.segment, pts:[]}).pts.push(r);
+    }
+    const lines = Object.values(segMap).filter(l => l.pts.length > 1);
+    if(lines.length){
+      const {shp, shx} = buildLineShapefile(lines);
+      const dbf = buildDBF(
+        [{name:'NAME',type:'C',len:64},{name:'SEGMENT',type:'N',len:9,dec:0},
+         {name:'POINTS',type:'N',len:9,dec:0},{name:'LENGTH_M',type:'N',len:13,dec:1}],
+        lines.map(l => {
+          let len = 0;
+          for(let i = 1; i < l.pts.length; i++) len += haversine(l.pts[i-1], l.pts[i]);
+          return {NAME:l.name, SEGMENT:l.seg, POINTS:l.pts.length, LENGTH_M:len};
+        })
+      );
+      zip.file(base+'_tracks.shp', shp);
+      zip.file(base+'_tracks.shx', shx);
+      zip.file(base+'_tracks.dbf', dbf);
+      zip.file(base+'_tracks.prj', WGS84_PRJ);
+    }
+
+    if(!wpts.length && !lines.length){ showError('No exportable features found.'); return; }
+
+    const blob = await zip.generateAsync({type:'blob'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = base + '_shapefile.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById('btnClear').addEventListener('click', () => {
   records = []; dataBounds = null; loadedName = '';
   gpsLayer.clearLayers();
@@ -755,7 +947,7 @@ document.getElementById('btnClear').addEventListener('click', () => {
   map.invalidateSize();
   document.getElementById('filechip').classList.remove('show');
   ['stPoints','stWpts','stDist','stEle'].forEach(id => document.getElementById(id).textContent='—');
-  ['btnCsv','btnZoom','btnClear'].forEach(id => document.getElementById(id).disabled = true);
+  ['btnCsv','btnShp','btnZoom','btnClear'].forEach(id => document.getElementById(id).disabled = true);
   roStatus.textContent = 'NO FILE LOADED';
   clearError();
 });
