@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trackplot — GPS file viewer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root{
+    --ink:#f2f4f1;          /* app background */
+    --panel:#ffffff;        /* panel white */
+    --panel-2:#f5f7f4;      /* raised surface */
+    --line:#dde3dc;         /* hairline */
+    --text:#22302a;         /* deep pine text */
+    --muted:#6d8177;        /* sage */
+    --amber:#e07b00;        /* GPS amber, darkened for contrast */
+    --track:#ff7a1a;        /* track orange */
+    --wpt:#1fae72;          /* waypoint green */
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--sans);
+    background:var(--ink);
+    color:var(--text);
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+
+  /* ---------- layout ---------- */
+  .app{display:flex;flex:1;min-height:0}
+  .sidebar{
+    width:300px;min-width:300px;
+    background:var(--panel);
+    border-right:1px solid var(--line);
+    display:flex;flex-direction:column;
+    overflow-y:auto;
+  }
+  .map-wrap{flex:1;display:flex;flex-direction:column;min-width:0}
+  .map-area{flex:1;position:relative;min-height:0}
+  #map{position:absolute;inset:0;background:#e6ebe4}
+
+  /* elevation profile */
+  .profile{
+    display:none;height:175px;flex:none;position:relative;
+    background:var(--panel);border-top:1px solid var(--line);
+  }
+  .profile.show{display:block}
+  #profileCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  .profile .ptitle{
+    position:absolute;top:8px;left:12px;z-index:2;pointer-events:none;
+    font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  }
+  .profile .preadout{
+    position:absolute;top:8px;right:14px;z-index:2;pointer-events:none;
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+  }
+  .profile .preadout b{color:var(--amber);font-weight:400}
+
+  /* ---------- sidebar ---------- */
+  .brand{
+    padding:18px 18px 14px;
+    border-bottom:1px solid var(--line);
+  }
+  .brand h1{
+    font-size:17px;font-weight:700;letter-spacing:.04em;
+  }
+  .brand h1 span{color:var(--amber)}
+  .brand p{font-size:12px;color:var(--muted);margin-top:3px}
+
+  .section{padding:16px 18px;border-bottom:1px solid var(--line)}
+  .section h2{
+    font-size:10px;font-weight:600;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:10px;
+  }
+
+  /* drop zone */
+  .drop{
+    border:1.5px dashed var(--line);
+    border-radius:10px;
+    padding:22px 14px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s,background .15s;
+  }
+  .drop:hover,.drop.drag{border-color:var(--amber);background:var(--panel-2)}
+  .drop .icon{font-size:22px;display:block;margin-bottom:6px}
+  .drop strong{font-size:13px;display:block;margin-bottom:3px}
+  .drop small{font-size:11px;color:var(--muted)}
+  #fileInput{display:none}
+
+  /* file chip */
+  .filechip{
+    display:none;margin-top:10px;
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+    padding:9px 11px;font-size:12px;
+    align-items:center;gap:8px;
+  }
+  .filechip.show{display:flex}
+  .filechip .dot{width:8px;height:8px;border-radius:50%;background:var(--wpt);flex:none}
+  .filechip .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* stats */
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stat{
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+    padding:9px 11px;
+  }
+  .stat .v{font-family:var(--mono);font-size:16px;color:var(--amber)}
+  .stat .l{font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
+
+  /* buttons */
+  .btn{
+    width:100%;
+    border:none;border-radius:8px;
+    padding:11px 14px;
+    font-size:13px;font-weight:600;font-family:var(--sans);
+    cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:8px;
+    transition:filter .15s,opacity .15s;
+  }
+  .btn:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+  .btn-amber{background:var(--amber);color:#ffffff}
+  .btn-amber:hover:not(:disabled){filter:brightness(1.08)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn + .btn{margin-top:8px}
+  .btn-ghost{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
+  .btn-ghost:hover:not(:disabled){background:#e9eee7}
+
+  /* legend */
+  .legend{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:7px}
+  .legend .row{display:flex;align-items:center;gap:9px}
+  .swatch-line{width:22px;height:3px;border-radius:2px;background:var(--track);flex:none}
+  .swatch-dot{width:10px;height:10px;border-radius:50%;background:var(--wpt);border:2px solid #fff;flex:none}
+
+  .msg{
+    display:none;margin-top:10px;font-size:12px;border-radius:8px;padding:9px 11px;line-height:1.45;
+  }
+  .msg.err{display:block;background:#fdeeee;border:1px solid #eec3c3;color:#a33a3a}
+
+  /* ---------- signature: coordinate readout strip ---------- */
+  .readout{
+    height:34px;flex:none;
+    background:var(--panel);
+    border-top:1px solid var(--line);
+    display:flex;align-items:center;gap:24px;
+    padding:0 18px;
+    font-family:var(--mono);font-size:12px;color:var(--muted);
+    white-space:nowrap;overflow:hidden;
+  }
+  .readout b{color:var(--amber);font-weight:400}
+  .readout .sep{color:var(--line)}
+
+  /* ---------- leaflet overrides ---------- */
+  .leaflet-control-layers{
+    background:var(--panel) !important;color:var(--text);
+    border:1px solid var(--line) !important;border-radius:8px !important;
+    box-shadow:0 4px 16px rgba(34,48,42,.15) !important;
+    font-family:var(--sans);
+  }
+  .leaflet-control-layers-expanded{padding:10px 14px 10px 10px !important;font-size:12px}
+  .leaflet-control-layers label{margin:3px 0}
+  .leaflet-control-zoom a{
+    background:var(--panel) !important;color:var(--text) !important;
+    border-color:var(--line) !important;
+  }
+  .leaflet-control-zoom a:hover{background:var(--panel-2) !important}
+  .leaflet-container .leaflet-control-attribution{
+    background:rgba(255,255,255,.8);color:var(--muted);font-size:10px;
+  }
+  .leaflet-container .leaflet-control-attribution a{color:var(--muted)}
+  .leaflet-popup-content-wrapper,.leaflet-popup-tip{
+    background:var(--panel);color:var(--text);
+  }
+  .leaflet-popup-content{font-size:12px;font-family:var(--mono);line-height:1.6;margin:12px 14px}
+  .leaflet-popup-content .k{color:var(--muted)}
+
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none !important}
+  }
+  @media (max-width:640px){
+    .app{flex-direction:column}
+    .sidebar{width:100%;min-width:0;max-height:46vh;border-right:none;border-bottom:1px solid var(--line)}
+    .stats{grid-template-columns:repeat(4,1fr)}
+    .readout{gap:14px;font-size:11px}
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>TRACK<span>PLOT</span></h1>
+      <p>GPS file viewer &amp; CSV converter</p>
+    </div>
+
+    <div class="section">
+      <h2>GPS file</h2>
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a GPS file">
+        <span class="icon">&#128752;</span>
+        <strong>Drop a GPS file here</strong>
+        <small>or click to browse — GPX or KML</small>
+      </div>
+      <input type="file" id="fileInput" accept=".gpx,.kml,application/gpx+xml,application/vnd.google-earth.kml+xml">
+      <div class="filechip" id="filechip"><span class="dot"></span><span class="name" id="filename"></span></div>
+      <div class="msg err" id="errmsg"></div>
+    </div>
+
+    <div class="section">
+      <h2>Summary</h2>
+      <div class="stats">
+        <div class="stat"><div class="v" id="stPoints">—</div><div class="l">Points</div></div>
+        <div class="stat"><div class="v" id="stWpts">—</div><div class="l">Waypoints</div></div>
+        <div class="stat"><div class="v" id="stDist">—</div><div class="l">Distance km</div></div>
+        <div class="stat"><div class="v" id="stEle">—</div><div class="l">Elev range m</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Export</h2>
+      <button class="btn btn-amber" id="btnCsv" disabled>&#8681;&nbsp; Download CSV</button>
+      <button class="btn btn-ghost" id="btnZoom" disabled>Zoom to data</button>
+      <button class="btn btn-ghost" id="btnClear" disabled>Clear data</button>
+    </div>
+
+    <div class="section">
+      <h2>Legend</h2>
+      <div class="legend">
+        <div class="row"><span class="swatch-line"></span> Track / route line</div>
+        <div class="row"><span class="swatch-dot"></span> Waypoint</div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="map-wrap">
+    <div class="map-area"><div id="map"></div></div>
+    <div class="profile" id="profile">
+      <span class="ptitle">Elevation profile</span>
+      <span class="preadout" id="preadout"></span>
+      <canvas id="profileCanvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="readout" id="readout">
+  <span>LAT <b id="roLat">--.------</b></span>
+  <span class="sep">|</span>
+  <span>LON <b id="roLon">---.------</b></span>
+  <span class="sep">|</span>
+  <span>ZOOM <b id="roZoom">4</b></span>
+  <span class="sep">|</span>
+  <span id="roStatus">NO FILE LOADED</span>
+</div>
+
+<script>
+/* ============================================================
+   Basemaps — ArcGIS Online tile services (Esri)
+   ============================================================ */
+const esriAttrib = 'Tiles &copy; Esri';
+function esri(service){
+  return L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/' + service + '/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:19, attribution:esriAttrib}
+  );
+}
+const basemaps = {
+  'Topographic':     esri('World_Topo_Map'),
+  'Streets':         esri('World_Street_Map'),
+  'Imagery':         esri('World_Imagery'),
+  'Terrain':         esri('World_Terrain_Base'),
+  'Ocean':           esri('Ocean_Basemap'),
+  'Light Gray':      esri('Canvas/World_Light_Gray_Base'),
+  'Dark Gray':       esri('Canvas/World_Dark_Gray_Base'),
+  'National Geographic': esri('NatGeo_World_Map')
+};
+
+const map = L.map('map', {center:[39.1, -94.58], zoom:4, layers:[basemaps['Topographic']]});
+L.control.layers(basemaps, null, {position:'topright', collapsed:true}).addTo(map);
+
+const gpsLayer = L.layerGroup().addTo(map);
+
+/* live coordinate readout */
+const roLat = document.getElementById('roLat'),
+      roLon = document.getElementById('roLon'),
+      roZoom = document.getElementById('roZoom'),
+      roStatus = document.getElementById('roStatus');
+map.on('mousemove', e => {
+  roLat.textContent = e.latlng.lat.toFixed(6);
+  roLon.textContent = e.latlng.lng.toFixed(6);
+});
+map.on('zoomend', () => roZoom.textContent = map.getZoom());
+
+/* ============================================================
+   State
+   ============================================================ */
+let records = [];   // {type,name,segment,lat,lon,ele,time}
+let dataBounds = null;
+let loadedName = '';
+
+/* ============================================================
+   Upload handling
+   ============================================================ */
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+const errmsg = document.getElementById('errmsg');
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){e.preventDefault();fileInput.click();} });
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {e.preventDefault();drop.classList.add('drag');}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {e.preventDefault();drop.classList.remove('drag');}));
+drop.addEventListener('drop', e => { if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if(fileInput.files.length) handleFile(fileInput.files[0]); fileInput.value=''; });
+
+function showError(t){ errmsg.textContent = t; errmsg.classList.add('err'); errmsg.style.display='block'; }
+function clearError(){ errmsg.style.display='none'; }
+
+function handleFile(file){
+  clearError();
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      const text = reader.result;
+      const ext = (file.name.split('.').pop()||'').toLowerCase();
+      let recs;
+      if(ext==='gpx' || /<gpx[\s>]/i.test(text))       recs = parseGPX(text);
+      else if(ext==='kml' || /<kml[\s>]/i.test(text))  recs = parseKML(text);
+      else throw new Error('Unrecognized format. Upload a .gpx or .kml file.');
+      if(!recs.length) throw new Error('No coordinates found in this file.');
+      records = recs;
+      loadedName = file.name;
+      renderData();
+      document.getElementById('filename').textContent = file.name;
+      document.getElementById('filechip').classList.add('show');
+      roStatus.textContent = recs.length + ' PTS LOADED';
+    }catch(err){
+      showError(err.message || 'Could not read this file.');
+    }
+  };
+  reader.onerror = () => showError('Could not read this file.');
+  reader.readAsText(file);
+}
+
+/* ============================================================
+   Parsers
+   ============================================================ */
+function parseXML(text){
+  const doc = new DOMParser().parseFromString(text,'text/xml');
+  if(doc.querySelector('parsererror')) throw new Error('This file is not valid XML.');
+  return doc;
+}
+function num(el, tag){
+  const n = el.getElementsByTagName(tag)[0];
+  if(!n) return '';
+  const v = parseFloat(n.textContent);
+  return isFinite(v) ? v : '';
+}
+function txt(el, tag){
+  const n = el.getElementsByTagName(tag)[0];
+  return n ? n.textContent.trim() : '';
+}
+
+function parseGPX(text){
+  const doc = parseXML(text);
+  const out = [];
+  // waypoints
+  for(const w of doc.getElementsByTagName('wpt')){
+    const lat = parseFloat(w.getAttribute('lat')), lon = parseFloat(w.getAttribute('lon'));
+    if(isFinite(lat)&&isFinite(lon))
+      out.push({type:'waypoint',name:txt(w,'name'),segment:'',lat,lon,ele:num(w,'ele'),time:txt(w,'time')});
+  }
+  // tracks
+  let segIdx = 0;
+  for(const trk of doc.getElementsByTagName('trk')){
+    const tname = txt(trk,'name');
+    for(const seg of trk.getElementsByTagName('trkseg')){
+      segIdx++;
+      for(const p of seg.getElementsByTagName('trkpt')){
+        const lat = parseFloat(p.getAttribute('lat')), lon = parseFloat(p.getAttribute('lon'));
+        if(isFinite(lat)&&isFinite(lon))
+          out.push({type:'trackpoint',name:tname,segment:segIdx,lat,lon,ele:num(p,'ele'),time:txt(p,'time')});
+      }
+    }
+  }
+  // routes
+  for(const rte of doc.getElementsByTagName('rte')){
+    segIdx++;
+    const rname = txt(rte,'name');
+    for(const p of rte.getElementsByTagName('rtept')){
+      const lat = parseFloat(p.getAttribute('lat')), lon = parseFloat(p.getAttribute('lon'));
+      if(isFinite(lat)&&isFinite(lon))
+        out.push({type:'routepoint',name:rname,segment:segIdx,lat,lon,ele:num(p,'ele'),time:txt(p,'time')});
+    }
+  }
+  return out;
+}
+
+function parseKML(text){
+  const doc = parseXML(text);
+  const out = [];
+  let segIdx = 0;
+  for(const pm of doc.getElementsByTagName('Placemark')){
+    const name = txt(pm,'name');
+    // Points -> waypoints
+    for(const pt of pm.getElementsByTagName('Point')){
+      const c = txt(pt,'coordinates').split(',');
+      const lon = parseFloat(c[0]), lat = parseFloat(c[1]), ele = parseFloat(c[2]);
+      if(isFinite(lat)&&isFinite(lon))
+        out.push({type:'waypoint',name,segment:'',lat,lon,ele:isFinite(ele)?ele:'',time:txt(pm,'when')});
+    }
+    // LineStrings -> tracks
+    for(const ls of pm.getElementsByTagName('LineString')){
+      segIdx++;
+      const coords = txt(ls,'coordinates').split(/\s+/).filter(Boolean);
+      for(const c of coords){
+        const p = c.split(',');
+        const lon = parseFloat(p[0]), lat = parseFloat(p[1]), ele = parseFloat(p[2]);
+        if(isFinite(lat)&&isFinite(lon))
+          out.push({type:'trackpoint',name,segment:segIdx,lat,lon,ele:isFinite(ele)?ele:'',time:''});
+      }
+    }
+    // gx:Track (Google extension)
+    for(const gx of pm.getElementsByTagName('gx:coord')){
+      segIdx++;
+      const p = gx.textContent.trim().split(/\s+/);
+      const lon = parseFloat(p[0]), lat = parseFloat(p[1]), ele = parseFloat(p[2]);
+      if(isFinite(lat)&&isFinite(lon))
+        out.push({type:'trackpoint',name,segment:segIdx,lat,lon,ele:isFinite(ele)?ele:'',time:''});
+    }
+  }
+  return out;
+}
+
+/* ============================================================
+   Render on map + stats
+   ============================================================ */
+function popupHtml(r){
+  let h = '';
+  if(r.name) h += '<span class="k">name</span> '+escapeHtml(r.name)+'<br>';
+  h += '<span class="k">lat</span> '+r.lat.toFixed(6)+'<br><span class="k">lon</span> '+r.lon.toFixed(6);
+  if(r.ele!=='') h += '<br><span class="k">ele</span> '+r.ele+' m';
+  if(r.time) h += '<br><span class="k">time</span> '+escapeHtml(r.time);
+  return h;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderData(){
+  gpsLayer.clearLayers();
+
+  // group linear points by segment
+  const segs = {};
+  let wptCount = 0, trkCount = 0;
+  for(const r of records){
+    if(r.type==='waypoint'){ wptCount++; continue; }
+    trkCount++;
+    (segs[r.segment] = segs[r.segment] || []).push(r);
+  }
+
+  const allLatLngs = [];
+  let dist = 0, eleMin = Infinity, eleMax = -Infinity;
+
+  for(const key of Object.keys(segs)){
+    const pts = segs[key];
+    const latlngs = pts.map(p => [p.lat, p.lon]);
+    latlngs.forEach(ll => allLatLngs.push(ll));
+    // casing + line for readability on imagery
+    L.polyline(latlngs, {color:'#ffffff', weight:6, opacity:.55}).addTo(gpsLayer);
+    const line = L.polyline(latlngs, {color:'#ff7a1a', weight:3, opacity:.95}).addTo(gpsLayer);
+    line.on('mousemove', onTrackHover);
+    line.on('mouseout', clearProfileHover);
+    // start / end markers
+    const first = pts[0], last = pts[pts.length-1];
+    L.circleMarker([first.lat,first.lon],{radius:5,color:'#fff',weight:2,fillColor:'#3ddc97',fillOpacity:1})
+      .bindPopup('<span class="k">start</span><br>'+popupHtml(first)).addTo(gpsLayer);
+    if(pts.length>1)
+      L.circleMarker([last.lat,last.lon],{radius:5,color:'#fff',weight:2,fillColor:'#e05252',fillOpacity:1})
+        .bindPopup('<span class="k">end</span><br>'+popupHtml(last)).addTo(gpsLayer);
+    // distance + elevation
+    for(let i=1;i<pts.length;i++) dist += haversine(pts[i-1], pts[i]);
+    for(const p of pts){ if(p.ele!==''){ eleMin=Math.min(eleMin,p.ele); eleMax=Math.max(eleMax,p.ele);} }
+  }
+
+  for(const r of records){
+    if(r.type!=='waypoint') continue;
+    allLatLngs.push([r.lat,r.lon]);
+    if(r.ele!==''){ eleMin=Math.min(eleMin,r.ele); eleMax=Math.max(eleMax,r.ele); }
+    L.circleMarker([r.lat,r.lon],{radius:6,color:'#fff',weight:2,fillColor:'#3ddc97',fillOpacity:1})
+      .bindPopup(popupHtml(r)).addTo(gpsLayer);
+  }
+
+  dataBounds = allLatLngs.length ? L.latLngBounds(allLatLngs) : null;
+  if(dataBounds) map.fitBounds(dataBounds.pad(0.15));
+
+  // stats
+  document.getElementById('stPoints').textContent = trkCount || '0';
+  document.getElementById('stWpts').textContent = wptCount || '0';
+  document.getElementById('stDist').textContent = trkCount>1 ? (dist/1000).toFixed(2) : '0';
+  document.getElementById('stEle').textContent = isFinite(eleMin)
+      ? Math.round(eleMin)+'–'+Math.round(eleMax) : '—';
+
+  document.getElementById('btnCsv').disabled = false;
+  document.getElementById('btnZoom').disabled = false;
+  document.getElementById('btnClear').disabled = false;
+
+  buildProfile(segs);
+}
+
+function haversine(a, b){
+  const R = 6371000, toR = Math.PI/180;
+  const dLat = (b.lat-a.lat)*toR, dLon = (b.lon-a.lon)*toR;
+  const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*toR)*Math.cos(b.lat*toR)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+/* ============================================================
+   Elevation profile  (tracks & routes only — waypoints excluded)
+   ============================================================ */
+const profileEl = document.getElementById('profile');
+const pCanvas   = document.getElementById('profileCanvas');
+const pCtx      = pCanvas.getContext('2d');
+const preadout  = document.getElementById('preadout');
+const PPAD = {l:48, r:16, t:30, b:22};
+
+let pData = [];        // [{lat,lon,ele,d,seg}] ordered along the track(s)
+let pTotal = 0, pMinE = 0, pMaxE = 0;
+let pBase = null;      // cached base chart image
+let pHoverIdx = -1;
+let hoverMarker = null;
+
+function buildProfile(segs){
+  pData = []; pTotal = 0;
+  let d = 0, minE = Infinity, maxE = -Infinity;
+  for(const key of Object.keys(segs)){
+    const pts = segs[key];
+    for(let i = 0; i < pts.length; i++){
+      if(i > 0) d += haversine(pts[i-1], pts[i]);
+      if(pts[i].ele !== ''){
+        pData.push({lat:pts[i].lat, lon:pts[i].lon, ele:pts[i].ele, d:d, seg:key});
+        minE = Math.min(minE, pts[i].ele);
+        maxE = Math.max(maxE, pts[i].ele);
+      }
+    }
+  }
+  pTotal = d;
+  if(pData.length < 2 || !isFinite(minE)){       // no usable elevation data
+    profileEl.classList.remove('show');
+    map.invalidateSize();
+    return;
+  }
+  if(minE === maxE){ minE -= 1; maxE += 1; }     // flat track: avoid /0
+  pMinE = minE; pMaxE = maxE;
+  profileEl.classList.add('show');
+  map.invalidateSize();
+  requestAnimationFrame(drawProfileBase);
+}
+
+function pX(d){ const w = pCanvas.clientWidth;  return PPAD.l + (d/pTotal)*(w - PPAD.l - PPAD.r); }
+function pY(e){ const h = pCanvas.clientHeight; return PPAD.t + (1-(e-pMinE)/(pMaxE-pMinE))*(h - PPAD.t - PPAD.b); }
+
+function drawProfileBase(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = pCanvas.clientWidth, h = pCanvas.clientHeight;
+  if(!w || !h) return;
+  pCanvas.width = w*dpr; pCanvas.height = h*dpr;
+  pCtx.setTransform(dpr,0,0,dpr,0,0);
+  pCtx.clearRect(0,0,w,h);
+  const css = getComputedStyle(document.documentElement);
+  const cLine = css.getPropertyValue('--line').trim(),
+        cMuted = css.getPropertyValue('--muted').trim(),
+        cTrack = css.getPropertyValue('--track').trim();
+
+  /* horizontal grid + elevation labels */
+  pCtx.font = '10px SFMono-Regular,Consolas,Menlo,monospace';
+  pCtx.textAlign = 'right'; pCtx.textBaseline = 'middle';
+  const ticks = 4;
+  for(let i = 0; i <= ticks; i++){
+    const e = pMinE + (pMaxE-pMinE)*i/ticks, y = pY(e);
+    pCtx.strokeStyle = cLine; pCtx.lineWidth = 1;
+    pCtx.beginPath(); pCtx.moveTo(PPAD.l, y); pCtx.lineTo(w-PPAD.r, y); pCtx.stroke();
+    pCtx.fillStyle = cMuted;
+    pCtx.fillText(Math.round(e)+' m', PPAD.l-6, y);
+  }
+  /* distance labels */
+  pCtx.textAlign = 'center'; pCtx.textBaseline = 'top';
+  for(let i = 0; i <= 4; i++){
+    const d = pTotal*i/4;
+    pCtx.fillText((d/1000).toFixed(d >= 10000 ? 0 : 1)+' km', pX(d), h-PPAD.b+6);
+  }
+
+  /* area fill + line, broken per segment */
+  let i = 0;
+  while(i < pData.length){
+    const seg = pData[i].seg;
+    let j = i;
+    while(j < pData.length && pData[j].seg === seg) j++;
+    const grad = pCtx.createLinearGradient(0, PPAD.t, 0, h-PPAD.b);
+    grad.addColorStop(0, 'rgba(255,122,26,.30)');
+    grad.addColorStop(1, 'rgba(255,122,26,.03)');
+    pCtx.beginPath();
+    pCtx.moveTo(pX(pData[i].d), pY(pData[i].ele));
+    for(let k = i+1; k < j; k++) pCtx.lineTo(pX(pData[k].d), pY(pData[k].ele));
+    pCtx.strokeStyle = cTrack; pCtx.lineWidth = 2; pCtx.lineJoin = 'round'; pCtx.stroke();
+    pCtx.lineTo(pX(pData[j-1].d), h-PPAD.b);
+    pCtx.lineTo(pX(pData[i].d), h-PPAD.b);
+    pCtx.closePath();
+    pCtx.fillStyle = grad; pCtx.fill();
+    i = j;
+  }
+  pBase = pCtx.getImageData(0, 0, pCanvas.width, pCanvas.height);
+}
+
+function drawProfileHover(idx){
+  if(!pBase) return;
+  pCtx.putImageData(pBase, 0, 0);
+  if(idx < 0) { preadout.textContent = ''; return; }
+  const dpr = window.devicePixelRatio || 1;
+  pCtx.setTransform(dpr,0,0,dpr,0,0);
+  const p = pData[idx], x = pX(p.d), y = pY(p.ele), h = pCanvas.clientHeight;
+  pCtx.strokeStyle = 'rgba(34,48,42,.45)'; pCtx.lineWidth = 1;
+  pCtx.setLineDash([3,3]);
+  pCtx.beginPath(); pCtx.moveTo(x, PPAD.t); pCtx.lineTo(x, h-PPAD.b); pCtx.stroke();
+  pCtx.setLineDash([]);
+  pCtx.beginPath(); pCtx.arc(x, y, 4.5, 0, Math.PI*2);
+  pCtx.fillStyle = '#ff7a1a'; pCtx.fill();
+  pCtx.strokeStyle = '#fff'; pCtx.lineWidth = 2; pCtx.stroke();
+  preadout.innerHTML = '<b>'+(p.d/1000).toFixed(2)+'</b> km &nbsp;&nbsp;<b>'+Math.round(p.ele)+'</b> m';
+}
+
+function setHover(idx, moveMapMarker){
+  if(idx === pHoverIdx) return;
+  pHoverIdx = idx;
+  drawProfileHover(idx);
+  if(idx < 0){
+    if(hoverMarker){ map.removeLayer(hoverMarker); hoverMarker = null; }
+    return;
+  }
+  if(moveMapMarker){
+    const p = pData[idx];
+    if(!hoverMarker){
+      hoverMarker = L.circleMarker([p.lat, p.lon], {
+        radius:8, color:'#fff', weight:3, fillColor:'#ff7a1a', fillOpacity:1, interactive:false, pane:'markerPane'
+      }).addTo(map);
+    } else hoverMarker.setLatLng([p.lat, p.lon]);
+  }
+}
+
+/* chart hover -> map marker */
+pCanvas.addEventListener('mousemove', e => {
+  if(!pData.length) return;
+  const rect = pCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const d = (x - PPAD.l) / (pCanvas.clientWidth - PPAD.l - PPAD.r) * pTotal;
+  /* binary search nearest by distance */
+  let lo = 0, hi = pData.length - 1;
+  while(lo < hi){ const mid = (lo+hi) >> 1; if(pData[mid].d < d) lo = mid+1; else hi = mid; }
+  if(lo > 0 && Math.abs(pData[lo-1].d - d) < Math.abs(pData[lo].d - d)) lo--;
+  setHover(lo, true);
+});
+pCanvas.addEventListener('mouseleave', () => setHover(-1, true));
+
+/* map track hover -> chart crosshair */
+function onTrackHover(e){
+  if(!pData.length) return;
+  const lat = e.latlng.lat, lon = e.latlng.lng;
+  const cosL = Math.cos(lat*Math.PI/180);
+  let best = -1, bestD = Infinity;
+  for(let i = 0; i < pData.length; i++){
+    const dy = pData[i].lat - lat, dx = (pData[i].lon - lon)*cosL;
+    const dd = dx*dx + dy*dy;
+    if(dd < bestD){ bestD = dd; best = i; }
+  }
+  setHover(best, true);
+}
+function clearProfileHover(){ setHover(-1, true); }
+
+window.addEventListener('resize', () => {
+  if(profileEl.classList.contains('show')){ drawProfileBase(); pHoverIdx = -1; }
+});
+
+/* ============================================================
+   CSV export
+   ============================================================ */
+function csvCell(v){
+  v = String(v==null?'':v);
+  return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
+}
+document.getElementById('btnCsv').addEventListener('click', () => {
+  const header = ['type','name','segment','latitude','longitude','elevation_m','time'];
+  const rows = [header.join(',')];
+  for(const r of records)
+    rows.push([r.type,r.name,r.segment,r.lat,r.lon,r.ele,r.time].map(csvCell).join(','));
+  const blob = new Blob([rows.join('\r\n')], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (loadedName.replace(/\.[^.]+$/,'') || 'gps-data') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById('btnZoom').addEventListener('click', () => {
+  if(dataBounds) map.fitBounds(dataBounds.pad(0.15));
+});
+
+document.getElementById('btnClear').addEventListener('click', () => {
+  records = []; dataBounds = null; loadedName = '';
+  gpsLayer.clearLayers();
+  pData = []; pBase = null; setHover(-1, true);
+  profileEl.classList.remove('show');
+  map.invalidateSize();
+  document.getElementById('filechip').classList.remove('show');
+  ['stPoints','stWpts','stDist','stEle'].forEach(id => document.getElementById(id).textContent='—');
+  ['btnCsv','btnZoom','btnClear'].forEach(id => document.getElementById(id).disabled = true);
+  roStatus.textContent = 'NO FILE LOADED';
+  clearError();
+});
+</script>
+</body>
+</html>
