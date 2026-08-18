@@ -132,6 +132,17 @@
   .btn-ghost{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
   .btn-ghost:hover:not(:disabled){background:#e9eee7}
 
+  /* download format selector */
+  .dllabel{display:block;font-size:11px;color:var(--muted);margin-bottom:5px}
+  .dlsel{
+    width:100%;margin-bottom:8px;
+    padding:9px 10px;font-size:13px;font-family:var(--sans);
+    background:var(--panel-2);color:var(--text);
+    border:1px solid var(--line);border-radius:8px;cursor:pointer;
+  }
+  .dlsel:disabled{opacity:.4;cursor:not-allowed}
+  .dlsel:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+
   /* unit switch */
   .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .seg button{
@@ -216,9 +227,9 @@
       <div class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a GPS file">
         <span class="icon">&#128752;</span>
         <strong>Drop a GPS file here</strong>
-        <small>or click to browse — GPX or KML</small>
+        <small>or click to browse — GPX, KML, CSV, or zipped shapefile</small>
       </div>
-      <input type="file" id="fileInput" accept=".gpx,.kml,application/gpx+xml,application/vnd.google-earth.kml+xml">
+      <input type="file" id="fileInput" accept=".gpx,.kml,.csv,.zip,application/gpx+xml,application/vnd.google-earth.kml+xml,text/csv,application/zip">
       <div class="filechip" id="filechip"><span class="dot"></span><span class="name" id="filename"></span></div>
       <div class="msg err" id="errmsg"></div>
     </div>
@@ -243,8 +254,14 @@
 
     <div class="section">
       <h2>Export</h2>
-      <button class="btn btn-amber" id="btnCsv" disabled>&#8681;&nbsp; Download CSV</button>
-      <button class="btn btn-amber" id="btnShp" disabled>&#8681;&nbsp; Download Shapefile (.zip)</button>
+      <label class="dllabel" for="selFormat">Format</label>
+      <select id="selFormat" class="dlsel" disabled>
+        <option value="csv">CSV (.csv)</option>
+        <option value="shp">Esri Shapefile (.zip)</option>
+        <option value="gpx">GPX (.gpx)</option>
+        <option value="kml">KML (.kml)</option>
+      </select>
+      <button class="btn btn-amber" id="btnDl" disabled>&#8681;&nbsp; Download</button>
       <button class="btn btn-ghost" id="btnZoom" disabled>Zoom to data</button>
       <button class="btn btn-ghost" id="btnClear" disabled>Clear data</button>
     </div>
@@ -364,25 +381,37 @@ function clearError(){ errmsg.style.display='none'; }
 
 function handleFile(file){
   clearError();
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
   const reader = new FileReader();
+
+  const finish = recs => {
+    if(!recs.length) throw new Error('No coordinates found in this file.');
+    records = recs;
+    loadedName = file.name;
+    renderData();
+    document.getElementById('filename').textContent = file.name;
+    document.getElementById('filechip').classList.add('show');
+    roStatus.textContent = recs.length + ' PTS LOADED';
+  };
+  const fail = err => showError(err.message || 'Could not read this file.');
+
+  if(ext === 'zip'){
+    reader.onload = () => { parseShapefileZip(reader.result).then(finish).catch(fail); };
+    reader.onerror = () => showError('Could not read this file.');
+    reader.readAsArrayBuffer(file);
+    return;
+  }
+
   reader.onload = () => {
     try{
       const text = reader.result;
-      const ext = (file.name.split('.').pop()||'').toLowerCase();
       let recs;
       if(ext==='gpx' || /<gpx[\s>]/i.test(text))       recs = parseGPX(text);
       else if(ext==='kml' || /<kml[\s>]/i.test(text))  recs = parseKML(text);
-      else throw new Error('Unrecognized format. Upload a .gpx or .kml file.');
-      if(!recs.length) throw new Error('No coordinates found in this file.');
-      records = recs;
-      loadedName = file.name;
-      renderData();
-      document.getElementById('filename').textContent = file.name;
-      document.getElementById('filechip').classList.add('show');
-      roStatus.textContent = recs.length + ' PTS LOADED';
-    }catch(err){
-      showError(err.message || 'Could not read this file.');
-    }
+      else if(ext==='csv')                              recs = parseCSVFile(text);
+      else throw new Error('Unrecognized format. Upload a .gpx, .kml, .csv, or zipped shapefile.');
+      finish(recs);
+    }catch(err){ fail(err); }
   };
   reader.onerror = () => showError('Could not read this file.');
   reader.readAsText(file);
@@ -478,6 +507,174 @@ function parseKML(text){
   return out;
 }
 
+/* ---------- CSV upload ---------- */
+function parseCSVRows(text){
+  const rows = []; let row = [], cell = '', q = false;
+  for(let i = 0; i < text.length; i++){
+    const ch = text[i];
+    if(q){
+      if(ch === '"'){ if(text[i+1] === '"'){ cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else if(ch === '"') q = true;
+    else if(ch === ','){ row.push(cell); cell = ''; }
+    else if(ch === '\n' || ch === '\r'){
+      if(ch === '\r' && text[i+1] === '\n') i++;
+      row.push(cell); cell = '';
+      if(row.length > 1 || row[0] !== '') rows.push(row);
+      row = [];
+    } else cell += ch;
+  }
+  row.push(cell);
+  if(row.length > 1 || row[0] !== '') rows.push(row);
+  return rows;
+}
+
+function parseCSVFile(text){
+  const rows = parseCSVRows(text);
+  if(rows.length < 2) throw new Error('CSV needs a header row plus at least one data row.');
+  const hdr = rows[0].map(h => h.trim().toLowerCase());
+  const col = names => { for(const n of names){ const i = hdr.indexOf(n); if(i >= 0) return i; } return -1; };
+  const iLat = col(['latitude','lat','y']);
+  const iLon = col(['longitude','lon','lng','long','x']);
+  if(iLat < 0 || iLon < 0)
+    throw new Error('CSV must have latitude and longitude columns (e.g. "lat"/"latitude" and "lon"/"lng"/"longitude").');
+  const iEle  = col(['elevation_m','elevation','ele','alt','altitude','z']);
+  const iName = col(['name','label','title']);
+  const iTime = col(['time','timestamp','datetime','date']);
+  const iType = col(['type']);
+  const iSeg  = col(['segment','seg','track','track_id']);
+
+  const out = [];
+  let autoSeg = 1;
+  for(let r = 1; r < rows.length; r++){
+    const c = rows[r];
+    const lat = parseFloat(c[iLat]), lon = parseFloat(c[iLon]);
+    if(!isFinite(lat) || !isFinite(lon)) continue;
+    const eleRaw = iEle >= 0 ? parseFloat(c[iEle]) : NaN;
+    let type = iType >= 0 ? String(c[iType]||'').trim().toLowerCase() : '';
+    let seg  = iSeg  >= 0 ? String(c[iSeg]||'').trim() : '';
+    if(type !== 'waypoint' && type !== 'trackpoint' && type !== 'routepoint')
+      type = (iType < 0 && iSeg >= 0 && seg !== '') ? 'trackpoint' : 'waypoint';   // segment column implies a track
+    if(type !== 'waypoint' && seg === '') seg = autoSeg;
+    out.push({
+      type, name: iName >= 0 ? (c[iName]||'') : '', segment: type === 'waypoint' ? '' : seg,
+      lat, lon, ele: isFinite(eleRaw) ? eleRaw : '', time: iTime >= 0 ? (c[iTime]||'') : ''
+    });
+  }
+  return out;
+}
+
+/* ---------- zipped Esri shapefile upload ---------- */
+async function parseShapefileZip(arrayBuf){
+  const zip = await JSZip.loadAsync(arrayBuf);
+  const shpNames = Object.keys(zip.files).filter(n =>
+    n.toLowerCase().endsWith('.shp') && !zip.files[n].dir && !n.split('/').pop().startsWith('.'));
+  if(!shpNames.length) throw new Error('No .shp file found inside this zip.');
+  const out = [];
+  let segIdx = 0;
+  for(const shpName of shpNames){
+    const stem = shpName.slice(0, -4);
+    const shpBuf = await zip.files[shpName].async('arraybuffer');
+    const dbfKey = Object.keys(zip.files).find(n => n.toLowerCase() === (stem+'.dbf').toLowerCase());
+    const attrs = dbfKey ? parseDBF(await zip.files[dbfKey].async('arraybuffer')) : [];
+    segIdx = readSHP(shpBuf, attrs, out, segIdx, stem.split('/').pop());
+  }
+  return out;
+}
+
+function parseDBF(buf){
+  const dv = new DataView(buf), u8 = new Uint8Array(buf);
+  const nRec = dv.getInt32(4, true), hdrSize = dv.getInt16(8, true), recSize = dv.getInt16(10, true);
+  const fields = [];
+  for(let o = 32; o < hdrSize - 1 && u8[o] !== 0x0D; o += 32){
+    let name = '';
+    for(let c = 0; c < 11 && u8[o+c]; c++) name += String.fromCharCode(u8[o+c]);
+    fields.push({name: name.toUpperCase(), type: String.fromCharCode(u8[o+11]), len: u8[o+16]});
+  }
+  const recs = [];
+  let off = hdrSize;
+  for(let r = 0; r < nRec && off + recSize <= buf.byteLength; r++, off += recSize){
+    if(u8[off] === 0x2A){ recs.push(null); continue; }        // deleted
+    const rec = {}; let p = off + 1;
+    for(const f of fields){
+      let s = '';
+      for(let c = 0; c < f.len; c++) s += String.fromCharCode(u8[p+c]);
+      rec[f.name] = s.trim(); p += f.len;
+    }
+    recs.push(rec);
+  }
+  return recs;
+}
+function attrLookup(rec){
+  if(!rec) return {name:'', ele:'', time:''};
+  const get = keys => { for(const k of keys) if(rec[k] !== undefined && rec[k] !== '') return rec[k]; return ''; };
+  const eleRaw = parseFloat(get(['ELEV_M','ELEVATION','ELEV','ELE','ALT','ALTITUDE','Z']));
+  return {
+    name: get(['NAME','LABEL','TITLE','ID']),
+    ele: isFinite(eleRaw) ? eleRaw : '',
+    time: get(['TIME','TIMESTAMP','DATE','DATETIME'])
+  };
+}
+
+function readSHP(buf, attrs, out, segIdx, layerName){
+  const dv = new DataView(buf);
+  const fileBytes = dv.getInt32(24, false) * 2;
+  let off = 100, recIdx = 0;
+  while(off + 8 <= Math.min(fileBytes, buf.byteLength)){
+    const contentWords = dv.getInt32(off + 4, false);
+    const content = off + 8, contentBytes = contentWords * 2;
+    if(content + contentBytes > buf.byteLength) break;
+    const shape = dv.getInt32(content, true);
+    const a = attrLookup(attrs[recIdx]);
+
+    if(shape === 1 || shape === 11 || shape === 21){                 // Point / PointZ / PointM
+      const lon = dv.getFloat64(content+4, true), lat = dv.getFloat64(content+12, true);
+      let ele = a.ele;
+      if(shape === 11 && contentBytes >= 28){
+        const z = dv.getFloat64(content+20, true);
+        if(isFinite(z) && z > -1e38) ele = z;
+      }
+      if(isFinite(lat) && isFinite(lon))
+        out.push({type:'waypoint', name:a.name, segment:'', lat, lon, ele, time:a.time});
+
+    } else if(shape === 8 || shape === 18 || shape === 28){          // MultiPoint variants
+      const n = dv.getInt32(content+36, true);
+      for(let i = 0; i < n; i++){
+        const lon = dv.getFloat64(content+40+i*16, true), lat = dv.getFloat64(content+48+i*16, true);
+        if(isFinite(lat) && isFinite(lon))
+          out.push({type:'waypoint', name:a.name, segment:'', lat, lon, ele:a.ele, time:a.time});
+      }
+
+    } else if([3,13,23,5,15,25].includes(shape)){                    // PolyLine / Polygon variants
+      const nParts = dv.getInt32(content+36, true), nPts = dv.getInt32(content+40, true);
+      const partsOff = content + 44, ptsOff = partsOff + 4*nParts;
+      // Z array (PolyLineZ/PolygonZ): after xy pairs come zmin,zmax, then z per point
+      let zOff = -1;
+      if((shape === 13 || shape === 15) && contentBytes >= (ptsOff - content) + 16*nPts + 16 + 8*nPts)
+        zOff = ptsOff + 16*nPts + 16;
+      const name = a.name || layerName;
+      for(let pi = 0; pi < nParts; pi++){
+        const start = dv.getInt32(partsOff + 4*pi, true);
+        const end = pi + 1 < nParts ? dv.getInt32(partsOff + 4*(pi+1), true) : nPts;
+        segIdx++;
+        for(let i = start; i < end; i++){
+          const lon = dv.getFloat64(ptsOff + i*16, true), lat = dv.getFloat64(ptsOff + i*16 + 8, true);
+          let ele = '';
+          if(zOff >= 0){
+            const z = dv.getFloat64(zOff + i*8, true);
+            if(isFinite(z) && z > -1e38) ele = z;
+          }
+          if(isFinite(lat) && isFinite(lon))
+            out.push({type:'trackpoint', name, segment:segIdx, lat, lon, ele, time:''});
+        }
+      }
+    }
+    off = content + contentBytes;
+    recIdx++;
+  }
+  return segIdx;
+}
+
 /* ============================================================
    Render on map + stats
    ============================================================ */
@@ -545,8 +742,8 @@ function renderData(fit = true){
   document.getElementById('stEle').textContent = isFinite(eleMin)
       ? Math.round(eleVal(eleMin))+'–'+Math.round(eleVal(eleMax)) : '—';
 
-  document.getElementById('btnCsv').disabled = false;
-  document.getElementById('btnShp').disabled = false;
+  document.getElementById('btnDl').disabled = false;
+  document.getElementById('selFormat').disabled = false;
   document.getElementById('btnZoom').disabled = false;
   document.getElementById('btnClear').disabled = false;
 
@@ -726,25 +923,101 @@ window.addEventListener('resize', () => {
 });
 
 /* ============================================================
-   CSV export
+   Exports
    ============================================================ */
+function baseName(){ return (loadedName.replace(/\.[^.]+$/,'') || 'gps-data').replace(/[^\w\-]+/g,'_'); }
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* --- CSV --- */
 function csvCell(v){
   v = String(v==null?'':v);
   return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
 }
-document.getElementById('btnCsv').addEventListener('click', () => {
+function exportCSV(){
   const header = ['type','name','segment','latitude','longitude','elevation_m','time'];
   const rows = [header.join(',')];
   for(const r of records)
     rows.push([r.type,r.name,r.segment,r.lat,r.lon,r.ele,r.time].map(csvCell).join(','));
-  const blob = new Blob([rows.join('\r\n')], {type:'text/csv;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = (loadedName.replace(/\.[^.]+$/,'') || 'gps-data') + '.csv';
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-});
+  downloadBlob(new Blob([rows.join('\r\n')], {type:'text/csv;charset=utf-8'}), baseName()+'.csv');
+}
+
+/* --- GPX / KML --- */
+function xmlEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
+function segGroups(){
+  const segMap = {};
+  for(const r of records){
+    if(r.type === 'waypoint') continue;
+    (segMap[r.segment] = segMap[r.segment] || {name:r.name, type:r.type, pts:[]}).pts.push(r);
+  }
+  return Object.values(segMap);
+}
+
+function exportGPX(){
+  const L2 = [];
+  L2.push('<?xml version="1.0" encoding="UTF-8"?>');
+  L2.push('<gpx version="1.1" creator="Trackplot" xmlns="http://www.topografix.com/GPX/1/1">');
+  for(const r of records){
+    if(r.type !== 'waypoint') continue;
+    L2.push('  <wpt lat="'+r.lat+'" lon="'+r.lon+'">');
+    if(r.ele !== '') L2.push('    <ele>'+r.ele+'</ele>');
+    if(r.time)       L2.push('    <time>'+xmlEsc(r.time)+'</time>');
+    if(r.name)       L2.push('    <name>'+xmlEsc(r.name)+'</name>');
+    L2.push('  </wpt>');
+  }
+  for(const g of segGroups()){
+    const route = g.type === 'routepoint';
+    const cTag = route ? 'rte' : 'trk', pTag = route ? 'rtept' : 'trkpt';
+    L2.push('  <'+cTag+'>');
+    if(g.name) L2.push('    <name>'+xmlEsc(g.name)+'</name>');
+    if(!route) L2.push('    <trkseg>');
+    const ind = route ? '    ' : '      ';
+    for(const p of g.pts){
+      let line = ind+'<'+pTag+' lat="'+p.lat+'" lon="'+p.lon+'">';
+      if(p.ele !== '') line += '<ele>'+p.ele+'</ele>';
+      if(p.time)       line += '<time>'+xmlEsc(p.time)+'</time>';
+      line += '</'+pTag+'>';
+      L2.push(line);
+    }
+    if(!route) L2.push('    </trkseg>');
+    L2.push('  </'+cTag+'>');
+  }
+  L2.push('</gpx>');
+  downloadBlob(new Blob([L2.join('\n')], {type:'application/gpx+xml'}), baseName()+'.gpx');
+}
+
+function exportKML(){
+  const coord = p => p.lon+','+p.lat+','+(p.ele !== '' ? p.ele : 0);
+  const L2 = [];
+  L2.push('<?xml version="1.0" encoding="UTF-8"?>');
+  L2.push('<kml xmlns="http://www.opengis.net/kml/2.2"><Document>');
+  L2.push('  <name>'+xmlEsc(baseName())+'</name>');
+  L2.push('  <Style id="trk"><LineStyle><color>ff1a7aff</color><width>3</width></LineStyle></Style>');
+  L2.push('  <Style id="wpt"><IconStyle><color>ff72ae1f</color></IconStyle></Style>');
+  for(const r of records){
+    if(r.type !== 'waypoint') continue;
+    L2.push('  <Placemark><styleUrl>#wpt</styleUrl>');
+    if(r.name) L2.push('    <name>'+xmlEsc(r.name)+'</name>');
+    if(r.time) L2.push('    <TimeStamp><when>'+xmlEsc(r.time)+'</when></TimeStamp>');
+    L2.push('    <Point><coordinates>'+coord(r)+'</coordinates></Point>');
+    L2.push('  </Placemark>');
+  }
+  for(const g of segGroups()){
+    L2.push('  <Placemark><styleUrl>#trk</styleUrl>');
+    if(g.name) L2.push('    <name>'+xmlEsc(g.name)+'</name>');
+    L2.push('    <LineString><tessellate>1</tessellate><coordinates>');
+    L2.push('      '+g.pts.map(coord).join(' '));
+    L2.push('    </coordinates></LineString>');
+    L2.push('  </Placemark>');
+  }
+  L2.push('</Document></kml>');
+  downloadBlob(new Blob([L2.join('\n')], {type:'application/vnd.google-earth.kml+xml'}), baseName()+'.kml');
+}
 
 document.getElementById('btnZoom').addEventListener('click', () => {
   if(dataBounds) map.fitBounds(dataBounds.pad(0.15));
@@ -880,12 +1153,9 @@ function buildDBF(fields, rows){
   return buf;
 }
 
-document.getElementById('btnShp').addEventListener('click', async () => {
-  const btn = document.getElementById('btnShp');
-  btn.disabled = true;
-  try{
-    const base = (loadedName.replace(/\.[^.]+$/,'') || 'gps-data').replace(/[^\w\-]+/g,'_');
-    const zip = new JSZip();
+async function exportShapefile(){
+  const base = baseName();
+  const zip = new JSZip();
 
     // waypoints -> point layer
     const wpts = records.filter(r => r.type === 'waypoint');
@@ -928,12 +1198,21 @@ document.getElementById('btnShp').addEventListener('click', async () => {
     if(!wpts.length && !lines.length){ showError('No exportable features found.'); return; }
 
     const blob = await zip.generateAsync({type:'blob'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = base + '_shapefile.zip';
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, base + '_shapefile.zip');
+}
+
+/* --- download dispatch --- */
+document.getElementById('btnDl').addEventListener('click', async () => {
+  if(!records.length) return;
+  const btn = document.getElementById('btnDl');
+  btn.disabled = true;
+  try{
+    switch(document.getElementById('selFormat').value){
+      case 'csv': exportCSV(); break;
+      case 'shp': await exportShapefile(); break;
+      case 'gpx': exportGPX(); break;
+      case 'kml': exportKML(); break;
+    }
   } finally {
     btn.disabled = false;
   }
@@ -947,7 +1226,7 @@ document.getElementById('btnClear').addEventListener('click', () => {
   map.invalidateSize();
   document.getElementById('filechip').classList.remove('show');
   ['stPoints','stWpts','stDist','stEle'].forEach(id => document.getElementById(id).textContent='—');
-  ['btnCsv','btnShp','btnZoom','btnClear'].forEach(id => document.getElementById(id).disabled = true);
+  ['btnDl','selFormat','btnZoom','btnClear'].forEach(id => document.getElementById(id).disabled = true);
   roStatus.textContent = 'NO FILE LOADED';
   clearError();
 });
